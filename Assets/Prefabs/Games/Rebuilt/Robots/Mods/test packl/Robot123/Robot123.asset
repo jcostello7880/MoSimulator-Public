@@ -1,0 +1,31 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: be1409438a6844eea96767966da7413b, type: 3}
+  m_Name: Robot123
+  m_EditorClassIdentifier: 
+  teamNumber: 123
+  teamName: 123
+  robotImage: {fileID: 0}
+  mainRobot:
+    displayName: 123
+    robotPrefab: {fileID: 4198401790662795169, guid: 691786c4649c18193bac938d5a28be14,
+      type: 3}
+    mainMenuPrefab: {fileID: 1561578713240170068, guid: 35a308403e9bc20458acbcaa471aa6cd,
+      type: 3}
+    spawnSelectionPrefab: {fileID: 1449570820095875323, guid: 37f3c42bad3719fcc9b270172d5b19c6,
+      type: 3}
+    preloadGamePiece: {fileID: 0}
+    tutorialCards:
+    - {fileID: 3512047754229714660, guid: 6ec5391591bdf9004b8254a41e68ab98, type: 3}
+    - {fileID: 4787243719233796986, guid: 040dec44835ad1256b7ee3d9dcb2de0a, type: 3}
+    - {fileID: 4007262141694539651, guid: 7949f677212926dd1bb1b21a8dbea9cb, type: 3}
+  alternateRobots: []

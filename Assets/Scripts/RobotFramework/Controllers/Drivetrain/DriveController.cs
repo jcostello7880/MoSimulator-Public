@@ -407,6 +407,7 @@ namespace RobotFramework.Controllers.Drivetrain
             if (drivetrainParent == null)
             {
                 Debug.LogError("Please add a Drivetrain Parent");
+                Debug.Log(gameObject.name);
                 _setupError = true;
             }
 

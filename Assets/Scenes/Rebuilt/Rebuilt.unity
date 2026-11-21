@@ -8808,7 +8808,7 @@ MonoBehaviour:
   redSpawnPoints:
   - {fileID: 1686937160}
   - {fileID: 693219865}
-  robotOverride: {fileID: 0}
+  robotOverride: {fileID: 11400000, guid: 65886ba8f522734c5ba97dd853bd39c6, type: 2}
   robotVersionId: 0
   gameYear: 2026
   gameType: 0
