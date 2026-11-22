@@ -23,6 +23,9 @@ using Object = UnityEngine.Object;
 /// Hood table (Use Shot Calculator off): hood angle looked up from the Hood Table by distance, flywheel
 ///       at Shooter Rpm. Either way the hood stows when not shooting.
 ///
+/// Shoot on move: while driving, the turret, hood and flywheel aim at a point shifted against the robot's
+///       velocity by the ball's flight time, so the ball's carried-over speed brings it into the target.
+///
 /// Auto agitation:
 ///   Spindexer: while feeding (and while intaking, if enabled) it runs forward and gives short reverse
 ///              "kicks" on a timer, so fuel doesn't jam.
@@ -49,6 +52,18 @@ public class TeamTitianium : RebuiltTurretRobot
         public bool reverse;
         [Tooltip("Speed relative to the list's rpm (1 = same speed, 0.5 = half). 0 = never spins.")]
         public float multiplier = 1f;
+    }
+
+    /// <summary>One entry in the calculator trim table: small corrections to the calculator at this distance.</summary>
+    [Serializable]
+    public class CalcTrim
+    {
+        [Tooltip("Distance from the turret to the target, in feet.")]
+        public float distanceFeet;
+        [Tooltip("Degrees added to the calculator's hood angle at this distance (+ or -).")]
+        public float hoodAngleOffset;
+        [Tooltip("Percent added to the calculator's flywheel rpm at this distance (5 = 5% faster, -5 = 5% slower).")]
+        public float rpmPercent;
     }
 
     /// <summary>One entry in the hood table: at this distance, use this hood angle.</summary>
@@ -105,6 +120,9 @@ public class TeamTitianium : RebuiltTurretRobot
     [SerializeField] private bool waitForTurret = false;
     [Tooltip("How close (degrees) the turret must be to its target when Wait For Turret is on.")]
     [SerializeField, Min(0f)] private float turretTolerance = 5f;
+    [Tooltip("While driving (faster than 1 ft/s), shoot without waiting for the turret at all. " +
+             "Wait For Turret then only applies when the robot is standing still.")]
+    [SerializeField] private bool ignoreTurretWhileMoving = true;
 
     [Header("Hood")]
     [Tooltip("The hood's GenericJoint (child with Rigidbody + ConfigurableJoint + GenericJoint). " +
@@ -155,6 +173,26 @@ public class TeamTitianium : RebuiltTurretRobot
     [SerializeField] private float maxShooterRpm = 6000f;
     [Tooltip("Only feed when the calculator says the shot is possible.")]
     [SerializeField] private bool onlyShootInRange = false;
+    [Tooltip("Fine-tuning for the calculator: at each distance, nudge its hood angle (degrees) and flywheel " +
+             "rpm (percent). Rows in any order; values between rows are blended; leave empty for no change.")]
+    [SerializeField] private CalcTrim[] calculatorTrimTable =
+    {
+        new CalcTrim { distanceFeet = 6f,  hoodAngleOffset = 0f, rpmPercent = 0f },
+        new CalcTrim { distanceFeet = 12f, hoodAngleOffset = 0f, rpmPercent = 0f },
+        new CalcTrim { distanceFeet = 18f, hoodAngleOffset = 0f, rpmPercent = 0f },
+    };
+
+    [Header("Shoot on move")]
+    [Tooltip("Lead the shot while driving: aim at where the target will be relative to the moving robot.")]
+    [SerializeField] private bool shootOnMove = true;
+    [Tooltip("How much of the robot's speed to correct for (1 = all of it). Lower if shots overshoot " +
+             "the way you're driving, raise if they lag behind.")]
+    [SerializeField, Range(0f, 2f)] private float moveCompensation = 1f;
+    [Tooltip("Extra seconds added to the ball's flight time (covers feed delay). Raise if moving shots " +
+             "still trail behind the way you're driving.")]
+    [SerializeField, Min(0f)] private float extraLeadTime = 0.1f;
+    [Tooltip("How quickly the robot-speed reading follows the real speed (1 = instantly, lower = smoother).")]
+    [SerializeField, Range(0.01f, 1f)] private float velocitySmoothing = 0.3f;
 
     [Header("Spindexer collider")]
     [Tooltip("Turn off the solid 'Wheel_InternalCore' collider that MoSim creates at runtime for every " +
@@ -211,6 +249,7 @@ public class TeamTitianium : RebuiltTurretRobot
     private bool _shootRequested;
     private float _spinUpTimer;
     private bool _feeding;
+    private bool _spindexerShooting;
     private float _spindexerClock;
     private float _shootingClock;
     private bool _intakeAgitating;
@@ -222,6 +261,14 @@ public class TeamTitianium : RebuiltTurretRobot
     private float _launchAngle;
     private float _exitSpeedFps;
     private bool _shotInRange = true;
+    private float _trimHood;
+    private float _trimRpmPercent;
+    private Vector3 _realTarget;
+    private bool _hasRealTarget;
+    private Vector3 _aimPoint;
+    private Vector3 _moveVelocity;
+    private float _timeOfFlight;
+    private float _leadFeet;
     private string _shotNote = "";
     private readonly Dictionary<InteractionRoller, float> _rollerCommands = new Dictionary<InteractionRoller, float>();
     private bool _coresDisabled;
@@ -281,23 +328,45 @@ public class TeamTitianium : RebuiltTurretRobot
 
     // ---------------------------------------------------------------------------------------- turret
 
+    // StateHandler calls one of these every frame, before UpdateMechanisms(). They point the turret at the
+    // real target and remember it; UpdateMechanisms() then moves the aim point for shoot-on-move.
     protected override void AllianceZone()
     {
-        if (turret) turret.SetDefaultMap(GenericTurret.DefaultMap.Hub);
+        if (!turret) return;
+        turret.ClearTarget();      // drop last frame's shoot-on-move aim point first
+        turret.SetDefaultMap(GenericTurret.DefaultMap.Hub);
+        RememberRealTarget();
     }
 
     protected override void NeutralZone()
     {
-        if (turret) turret.SetPassMapClosest();
+        if (!turret) return;
+        turret.ClearTarget();      // drop last frame's shoot-on-move aim point first
+        turret.SetPassMapClosest();
+        RememberRealTarget();
+    }
+
+    private void RememberRealTarget()
+    {
+        _realTarget = turret.GetCurrentTarget();
+        _hasRealTarget = _realTarget != Vector3.zero;
     }
 
     /// <summary>True once the shooter has spun up (and the turret is aimed, if Wait For Turret is on).</summary>
     protected override bool Aligned()
     {
         bool spunUp = _spinUpTimer >= spinUpTime;
-        bool turretReady = !waitForTurret || (turret && Mathf.Abs(turret.GetError()) < turretTolerance);
+        bool turretReady = !WaitingForTurretNow() || (turret && Mathf.Abs(turret.GetError()) < turretTolerance);
         bool rangeOk = !onlyShootInRange || !useShotCalculator || _shotInRange;
         return spunUp && turretReady && rangeOk;
+    }
+
+    /// <summary>True when feeding should wait for the turret right now (never while driving, if Ignore Turret While Moving is on).</summary>
+    private bool WaitingForTurretNow()
+    {
+        if (!waitForTurret) return false;
+        bool moving = _moveVelocity.magnitude * 3.28084f > 1f;
+        return !(moving && ignoreTurretWhileMoving);
     }
 
     protected override void HandleSwm()
@@ -376,8 +445,14 @@ public class TeamTitianium : RebuiltTurretRobot
         }
         _feeding = _shootRequested && Aligned();
 
+        // With a kicker, the kicker is what actually fires fuel, so the spindexer only needs the shooter
+        // spun up: it keeps fuel moving toward the kicker even while the turret is still lining up or the
+        // robot is driving. With no kicker, the spindexer IS the feeder, so it waits for the full check.
+        bool hasKicker = Count(kickerRollers) > 0;
+        _spindexerShooting = hasKicker ? (_shootRequested && _spinUpTimer >= spinUpTime) : _feeding;
+
         // Spindexer clock runs whenever the spindexer is being driven, so kicks keep their rhythm.
-        bool spindexerActive = _feeding || (spindexWhileIntaking && intaking);
+        bool spindexerActive = _spindexerShooting || (spindexWhileIntaking && intaking);
         if (spindexerActive) _spindexerClock += dt;
         else _spindexerClock = 0f;
 
@@ -408,9 +483,18 @@ public class TeamTitianium : RebuiltTurretRobot
 
         SetRamp(ExtendedFraction >= rampMinFraction);
 
-        // Hood + flywheel: aim from the distance to whatever the turret is aiming at (hub, or pass target).
+        // Shoot on move: work out where to aim, then point the turret there.
+        UpdateAimPoint();
+
+        // Hood + flywheel: aim from the distance to the aim point.
         _distanceFeet = DistanceToTargetFeet();
         bool aiming = (_shootRequested || hoodAlwaysTrack) && _distanceFeet >= 0f;
+
+        if (!aiming || !useShotCalculator)
+        {
+            _trimHood = 0f;
+            _trimRpmPercent = 0f;
+        }
 
         if (!aiming)
         {
@@ -462,35 +546,9 @@ public class TeamTitianium : RebuiltTurretRobot
     /// </summary>
     private void CalculateShot()
     {
-        Vector3 target = turret.GetCurrentTarget();
-        Vector3 origin = ShotOriginPosition();
-
-        Vector3 flat = target - origin;
-        flat.y = 0f;
-        float d = flat.magnitude;                                                  // meters, flat
-        float h = (target.y - origin.y) + aimHeightOffsetInches * 0.0254f;          // meters, up is +
-        float g = Physics.gravity.magnitude;
+        SolveShot(_aimPoint, out float angle, out float speed, out _, out float h);
         _heightDiffFeet = h * 3.28084f;
-
-        // Launch angles the hood can physically make.
-        float angleAtMin = LaunchAngleForHood(hoodMinAngle);
-        float angleAtMax = LaunchAngleForHood(hoodMaxAngle);
-        float lowestAngle = Mathf.Min(angleAtMin, angleAtMax);
-        float highestAngle = Mathf.Max(angleAtMin, angleAtMax);
-
-        // The angle that needs the least speed is halfway between straight up and the line to the target.
-        float minSpeedAngle = 45f + 0.5f * Mathf.Atan2(h, d) * Mathf.Rad2Deg;
-        float angle = Mathf.Clamp(minSpeedAngle + arcBiasDegrees, lowestAngle, highestAngle);
-
-        float speed = SpeedForAngle(angle, d, h, g);
         _shotNote = "";
-
-        // Too flat to clear the height: try the steepest angle the hood allows instead.
-        if (float.IsNaN(speed))
-        {
-            angle = highestAngle;
-            speed = SpeedForAngle(angle, d, h, g);
-        }
 
         if (float.IsNaN(speed))
         {
@@ -510,10 +568,131 @@ public class TeamTitianium : RebuiltTurretRobot
             _shotNote = "too far: needs " + rpm.ToString("0") + " rpm";
         }
 
-        _launchAngle = angle;
-        _exitSpeedFps = speed * 3.28084f;
+        // Fine-tuning: per-distance corrections from the Calculator Trim Table.
+        GetTrim(_distanceFeet, out _trimHood, out _trimRpmPercent);
+        rpm *= 1f + _trimRpmPercent / 100f;
+
         _shooterTargetRpm = Mathf.Clamp(rpm, minShooterRpm, maxShooterRpm);
-        _hoodTarget = Mathf.Clamp(HoodForLaunchAngle(angle), hoodMinAngle, hoodMaxAngle);
+        _hoodTarget = Mathf.Clamp(HoodForLaunchAngle(angle) + _trimHood, hoodMinAngle, hoodMaxAngle);
+
+        // Show the FINAL shot (after trim), so table edits are visible in the debug box.
+        _launchAngle = LaunchAngleForHood(_hoodTarget);
+        _exitSpeedFps = _shooterTargetRpm / 60f * 2f * Mathf.PI * flywheelRadiusInches * 0.0254f * launchEfficiency * 3.28084f;
+    }
+
+    /// <summary>
+    /// Projectile solve for one target point: picks a launch angle the hood can reach and the ball speed
+    /// (m/s, relative to the robot) that lands on it. speed is NaN if the hood can't make the shot.
+    /// </summary>
+    private void SolveShot(Vector3 target, out float angle, out float speed, out float d, out float h)
+    {
+        Vector3 origin = ShotOriginPosition();
+        Vector3 flat = target - origin;
+        flat.y = 0f;
+        d = flat.magnitude;                                                      // meters, flat
+        h = (target.y - origin.y) + aimHeightOffsetInches * 0.0254f;              // meters, up is +
+        float g = Physics.gravity.magnitude;
+
+        // Launch angles the hood can physically make.
+        float angleAtMin = LaunchAngleForHood(hoodMinAngle);
+        float angleAtMax = LaunchAngleForHood(hoodMaxAngle);
+        float lowestAngle = Mathf.Min(angleAtMin, angleAtMax);
+        float highestAngle = Mathf.Max(angleAtMin, angleAtMax);
+
+        // The angle that needs the least speed is halfway between straight up and the line to the target.
+        float minSpeedAngle = 45f + 0.5f * Mathf.Atan2(h, d) * Mathf.Rad2Deg;
+        angle = Mathf.Clamp(minSpeedAngle + arcBiasDegrees, lowestAngle, highestAngle);
+        speed = SpeedForAngle(angle, d, h, g);
+
+        // Too flat to clear the height: try the steepest angle the hood allows instead.
+        if (float.IsNaN(speed))
+        {
+            angle = highestAngle;
+            speed = SpeedForAngle(angle, d, h, g);
+        }
+    }
+
+    /// <summary>
+    /// Shoot on move. The ball keeps the robot's sideways speed after it leaves, so aim at a point shifted
+    /// back by (robot velocity × flight time). Flight time depends on the aim point, so it is refined a
+    /// few times. Then the turret is pointed at that aim point.
+    /// </summary>
+    private void UpdateAimPoint()
+    {
+        if (!turret || !_hasRealTarget)
+        {
+            _aimPoint = _realTarget;
+            _timeOfFlight = 0f;
+            _leadFeet = 0f;
+            return;
+        }
+
+        Vector3 velocity = rb ? rb.velocity : Vector3.zero;
+        velocity.y = 0f;
+        _moveVelocity = Vector3.Lerp(_moveVelocity, velocity, velocitySmoothing);
+
+        Vector3 aim = _realTarget;
+        if (shootOnMove)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                SolveShot(aim, out float angle, out float speed, out float d, out _);
+                float horizontalSpeed = speed * Mathf.Cos(angle * Mathf.Deg2Rad);
+                if (float.IsNaN(horizontalSpeed) || horizontalSpeed < 0.1f) break;
+
+                _timeOfFlight = d / horizontalSpeed;
+                aim = _realTarget - _moveVelocity * ((_timeOfFlight + extraLeadTime) * moveCompensation);
+            }
+
+            turret.SetTarget(aim);
+        }
+        else
+        {
+            _timeOfFlight = 0f;
+        }
+
+        _aimPoint = aim;
+        Vector3 lead = aim - _realTarget;
+        lead.y = 0f;
+        _leadFeet = lead.magnitude * 3.28084f;
+    }
+
+    /// <summary>Blends the two nearest rows of the Calculator Trim Table for this distance. Empty table = no trim.</summary>
+    private void GetTrim(float feet, out float hoodOffset, out float rpmPercent)
+    {
+        hoodOffset = 0f;
+        rpmPercent = 0f;
+        if (calculatorTrimTable == null || calculatorTrimTable.Length == 0 || feet < 0f) return;
+
+        var rows = new List<CalcTrim>();
+        foreach (var row in calculatorTrimTable) if (row != null) rows.Add(row);
+        if (rows.Count == 0) return;
+        rows.Sort((a, b) => a.distanceFeet.CompareTo(b.distanceFeet));
+
+        if (feet <= rows[0].distanceFeet)
+        {
+            hoodOffset = rows[0].hoodAngleOffset;
+            rpmPercent = rows[0].rpmPercent;
+            return;
+        }
+        var last = rows[rows.Count - 1];
+        if (feet >= last.distanceFeet)
+        {
+            hoodOffset = last.hoodAngleOffset;
+            rpmPercent = last.rpmPercent;
+            return;
+        }
+        for (int i = 0; i < rows.Count - 1; i++)
+        {
+            var a = rows[i];
+            var b = rows[i + 1];
+            if (feet < a.distanceFeet || feet > b.distanceFeet) continue;
+            float span = b.distanceFeet - a.distanceFeet;
+            float t = span > 0.0001f ? (feet - a.distanceFeet) / span : 0f;
+            hoodOffset = Mathf.Lerp(a.hoodAngleOffset, b.hoodAngleOffset, t);
+            rpmPercent = Mathf.Lerp(a.rpmPercent, b.rpmPercent, t);
+            return;
+        }
     }
 
     /// <summary>Ball speed (m/s) to land at flat distance d and height h when launched at this angle. NaN if impossible.</summary>
@@ -557,15 +736,10 @@ public class TeamTitianium : RebuiltTurretRobot
     /// <summary>Flat (ignoring height) distance from the turret to its current target, in feet. -1 if no target.</summary>
     private float DistanceToTargetFeet()
     {
-        if (!turret) return -1f;
+        if (!turret || !_hasRealTarget) return -1f;  // the turret has no target yet
 
-        Vector3 target = turret.GetCurrentTarget();
-        if (target == Vector3.zero) return -1f;     // the turret has no target yet
-
-        Transform from = turret.GetReferencePoint();
-        Vector3 origin = from ? from.position : turret.transform.position;
-
-        Vector3 flat = target - origin;
+        Vector3 origin = ShotOriginPosition();
+        Vector3 flat = _aimPoint - origin;
         flat.y = 0f;
         return flat.magnitude * 3.28084f;           // meters → feet
     }
@@ -628,7 +802,7 @@ public class TeamTitianium : RebuiltTurretRobot
 
         // 2. Spindexer: forward, with reverse kicks when agitation is on.
         float spindexerSpeed = 0f;
-        if (_feeding) spindexerSpeed = spindexerRpm;
+        if (_spindexerShooting) spindexerSpeed = spindexerRpm;
         else if (spindexWhileIntaking && intaking) spindexerSpeed = spindexerIntakingRpm;
         if (_spindexerKicking) spindexerSpeed = -spindexerSpeed * spindexerReverseFraction;
 
@@ -707,19 +881,43 @@ public class TeamTitianium : RebuiltTurretRobot
             $"Left trigger: {(IntakeAction ? "HELD" : "not held")}\n" +
             $"Intake toggle (left bumper): {(_intakeToggled ? "ON" : "off")}   Mode: {_intakeMode}   " +
             $"Slide target: {_targetInches:0.0} in\n" +
-            $"Spin-up: {_spinUpTimer:0.00} / {spinUpTime:0.00} s   Feeding: {(_feeding ? "YES" : "no")}\n" +
+            $"Spin-up: {_spinUpTimer:0.00} / {spinUpTime:0.00} s   Feeding: {(_feeding ? "YES" : "no")}   " +
+            $"Wait For Turret: {(waitForTurret ? "ON" : "off")}   Only In Range: {(onlyShootInRange ? "ON" : "off")}\n" +
+            $"Feed waiting for: {FeedBlockReason()}   Spindexer running: {(_spindexerShooting ? "YES" : "no")}\n" +
             $"Agitating  spindexer kick: {(_spindexerKicking ? "YES" : "no")}   intake pump: {(_intakeAgitating ? "YES" : "no")}\n" +
             $"Distance to target: {(_distanceFeet >= 0f ? _distanceFeet.ToString("0.0") + " ft" : "no target")}   " +
             $"Hood target: {_hoodTarget:0.0}°   Hood actual: {HoodActual()}\n" +
             $"Shot: {(useShotCalculator ? "calculator" : "table")}   height {_heightDiffFeet:0.0} ft   " +
             $"launch {_launchAngle:0.0}°   ball {_exitSpeedFps:0.0} ft/s   flywheel {_shooterTargetRpm:0} rpm   " +
             $"{(_shotInRange ? "IN RANGE" : "OUT OF RANGE")} {_shotNote}\n" +
+            $"Trim at this distance: hood {_trimHood:+0.0;-0.0;0}°   rpm {_trimRpmPercent:+0.0;-0.0;0}%\n" +
+            $"Shoot on move: {(shootOnMove ? "ON" : "off")}   robot {_moveVelocity.magnitude * 3.28084f:0.0} ft/s   " +
+            $"flight {_timeOfFlight:0.00} s   lead {_leadFeet:0.0} ft\n" +
             $"Rollers  intake: {Count(intakeRollerList)}   spindexer: {Count(spindexerRollers)}   " +
             $"kicker: {Count(kickerRollers)}   shooter: {Count(shooterRollers)}\n" +
             $"Spindexer rpm: {RealRpm(spindexerRollers)}   Kicker rpm: {RealRpm(kickerRollers)}";
 
-        GUI.Box(new Rect(10, 10, 640, 215), GUIContent.none);
-        GUI.Label(new Rect(18, 14, 630, 210), text);
+        GUI.Box(new Rect(10, 10, 680, 275), GUIContent.none);
+        GUI.Label(new Rect(18, 14, 670, 270), text);
+    }
+
+    /// <summary>What is stopping Feed() right now, in plain words (for the debug box).</summary>
+    private string FeedBlockReason()
+    {
+        if (!_shootRequested) return "right trigger";
+        var reasons = new List<string>();
+        if (_spinUpTimer < spinUpTime) reasons.Add("spin-up");
+        if (WaitingForTurretNow())
+        {
+            if (!turret) reasons.Add("turret (none assigned)");
+            else
+            {
+                float error = Mathf.Abs(turret.GetError());
+                if (error >= turretTolerance) reasons.Add($"turret aim ({error:0.0}° off, needs < {turretTolerance:0.0}°)");
+            }
+        }
+        if (onlyShootInRange && useShotCalculator && !_shotInRange) reasons.Add("shot out of range");
+        return reasons.Count == 0 ? "nothing (feeding)" : string.Join(", ", reasons);
     }
 
     private string HoodActual()
