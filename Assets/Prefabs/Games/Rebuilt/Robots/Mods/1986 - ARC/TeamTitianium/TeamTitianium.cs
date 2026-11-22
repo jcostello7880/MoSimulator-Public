@@ -17,8 +17,11 @@ using Object = UnityEngine.Object;
 ///   Robot Special (Y / V)                 outtakes through the intake.
 ///   Right Trigger (K), held               spins up the shooter, then feeds with the spindexer and kicker.
 ///
-/// Hood: while shooting, the hood angle is looked up from the Hood Table using the flat distance from
-///       the turret to its target (hub or pass target), blending between rows. Otherwise it stows.
+/// Shot calculator (Use Shot Calculator on): while shooting, works out the launch angle and ball speed
+///       with projectile physics from the distance AND height to the target, then sets the hood angle and
+///       flywheel rpm to match. Tune Launch Efficiency until shots land.
+/// Hood table (Use Shot Calculator off): hood angle looked up from the Hood Table by distance, flywheel
+///       at Shooter Rpm. Either way the hood stows when not shooting.
 ///
 /// Auto agitation:
 ///   Spindexer: while feeding (and while intaking, if enabled) it runs forward and gives short reverse
@@ -128,6 +131,36 @@ public class TeamTitianium : RebuiltTurretRobot
     [Tooltip("Keep aiming the hood even when not shooting, so it is already set when you pull the trigger.")]
     [SerializeField] private bool hoodAlwaysTrack = false;
 
+    [Header("Shot calculator")]
+    [Tooltip("On: hood angle AND flywheel rpm are worked out with physics from distance and height. " +
+             "Off: the hood uses the Hood Table and the flywheel uses Shooter Rpm.")]
+    [SerializeField] private bool useShotCalculator = true;
+    [Tooltip("Optional: an empty object placed where fuel leaves the shooter. If empty, the hood joint " +
+             "(or the turret) is used.")]
+    [SerializeField] private Transform shotOrigin;
+    [Tooltip("Aim this many inches above (+) or below (-) the target point.")]
+    [SerializeField] private float aimHeightOffsetInches = 0f;
+    [Tooltip("Launch angle (degrees above flat) when the hood angle is 0.")]
+    [SerializeField] private float launchAngleAtHoodZero = 75f;
+    [Tooltip("Tick if raising the hood makes the shot FLATTER (most hoods). Untick if it makes it steeper.")]
+    [SerializeField] private bool hoodFlattensShot = true;
+    [Tooltip("Degrees steeper than the lowest-speed arc. Higher = loftier shot that drops into the goal.")]
+    [SerializeField] private float arcBiasDegrees = 8f;
+    [Tooltip("Flywheel wheel radius, inches.")]
+    [SerializeField, Min(0.1f)] private float flywheelRadiusInches = 2f;
+    [Tooltip("Ball speed ÷ wheel surface speed. Tune this: shots short → lower it, shots long → raise it.")]
+    [SerializeField, Range(0.05f, 1.5f)] private float launchEfficiency = 0.5f;
+    [Tooltip("The calculator never asks for less / more flywheel rpm than this.")]
+    [SerializeField] private float minShooterRpm = 1000f;
+    [SerializeField] private float maxShooterRpm = 6000f;
+    [Tooltip("Only feed when the calculator says the shot is possible.")]
+    [SerializeField] private bool onlyShootInRange = false;
+
+    [Header("Spindexer collider")]
+    [Tooltip("Turn off the solid 'Wheel_InternalCore' collider that MoSim creates at runtime for every " +
+             "spindexer roller. The rollers still spin and still push fuel.")]
+    [SerializeField] private bool disableSpindexerCores = true;
+
     [Header("Spindexer agitation")]
     [Tooltip("Give the spindexer short reverse kicks on a timer so fuel doesn't jam.")]
     [SerializeField] private bool agitateSpindexer = true;
@@ -184,7 +217,14 @@ public class TeamTitianium : RebuiltTurretRobot
     private bool _spindexerKicking;
     private float _distanceFeet = -1f;
     private float _hoodTarget;
+    private float _shooterTargetRpm;
+    private float _heightDiffFeet;
+    private float _launchAngle;
+    private float _exitSpeedFps;
+    private bool _shotInRange = true;
+    private string _shotNote = "";
     private readonly Dictionary<InteractionRoller, float> _rollerCommands = new Dictionary<InteractionRoller, float>();
+    private bool _coresDisabled;
 
     /// <summary>How far the slide is actually out, 0 (stowed) to 1 (deployed).</summary>
     public float ExtendedFraction =>
@@ -256,7 +296,8 @@ public class TeamTitianium : RebuiltTurretRobot
     {
         bool spunUp = _spinUpTimer >= spinUpTime;
         bool turretReady = !waitForTurret || (turret && Mathf.Abs(turret.GetError()) < turretTolerance);
-        return spunUp && turretReady;
+        bool rangeOk = !onlyShootInRange || !useShotCalculator || _shotInRange;
+        return spunUp && turretReady && rangeOk;
     }
 
     protected override void HandleSwm()
@@ -317,6 +358,8 @@ public class TeamTitianium : RebuiltTurretRobot
     /// <summary>Updates the shooter / agitation timers and decides the slide target for this frame.</summary>
     private void UpdateMechanisms()
     {
+        if (disableSpindexerCores && !_coresDisabled) DisableSpindexerCores();
+
         float dt = Time.deltaTime;
         bool intaking = _intakeMode == IntakeMode.Intaking;
 
@@ -365,10 +408,148 @@ public class TeamTitianium : RebuiltTurretRobot
 
         SetRamp(ExtendedFraction >= rampMinFraction);
 
-        // Hood: aim from the distance to whatever the turret is aiming at (hub, or pass target).
+        // Hood + flywheel: aim from the distance to whatever the turret is aiming at (hub, or pass target).
         _distanceFeet = DistanceToTargetFeet();
-        bool aimHood = (_shootRequested || hoodAlwaysTrack) && _distanceFeet >= 0f;
-        _hoodTarget = aimHood ? HoodAngleForDistance(_distanceFeet) : hoodStowAngle;
+        bool aiming = (_shootRequested || hoodAlwaysTrack) && _distanceFeet >= 0f;
+
+        if (!aiming)
+        {
+            _hoodTarget = hoodStowAngle;
+            _shooterTargetRpm = shooterRpm;
+            _shotInRange = true;
+            _shotNote = _distanceFeet < 0f ? "no target" : "";
+        }
+        else if (useShotCalculator)
+        {
+            CalculateShot();
+        }
+        else
+        {
+            _hoodTarget = HoodAngleForDistance(_distanceFeet);
+            _shooterTargetRpm = shooterRpm;
+            _shotInRange = true;
+            _shotNote = "table";
+        }
+    }
+
+    /// <summary>
+    /// Each Interaction Roller builds a solid "Wheel_InternalCore" collider when it starts. This finds the
+    /// ones on the spindexer rollers and switches them off. Runs every frame until every spindexer roller's
+    /// core has been found (the rollers may start after the robot).
+    /// </summary>
+    private void DisableSpindexerCores()
+    {
+        if (spindexerRollers == null) { _coresDisabled = true; return; }
+
+        bool allFound = true;
+        foreach (var r in spindexerRollers)
+        {
+            if (r == null || !r.roller) continue;
+
+            Transform core = r.roller.transform.Find("Wheel_InternalCore");
+            if (core == null) { allFound = false; continue; }
+
+            foreach (var col in core.GetComponents<Collider>()) col.enabled = false;
+        }
+        _coresDisabled = allFound;
+    }
+
+    // ---------------------------------------------------------------------------------------- shot calculator
+
+    /// <summary>
+    /// Projectile math (no air drag): picks a launch angle the hood can reach, works out the ball speed
+    /// that lands it on the target, then converts that speed to flywheel rpm and the angle to a hood angle.
+    /// </summary>
+    private void CalculateShot()
+    {
+        Vector3 target = turret.GetCurrentTarget();
+        Vector3 origin = ShotOriginPosition();
+
+        Vector3 flat = target - origin;
+        flat.y = 0f;
+        float d = flat.magnitude;                                                  // meters, flat
+        float h = (target.y - origin.y) + aimHeightOffsetInches * 0.0254f;          // meters, up is +
+        float g = Physics.gravity.magnitude;
+        _heightDiffFeet = h * 3.28084f;
+
+        // Launch angles the hood can physically make.
+        float angleAtMin = LaunchAngleForHood(hoodMinAngle);
+        float angleAtMax = LaunchAngleForHood(hoodMaxAngle);
+        float lowestAngle = Mathf.Min(angleAtMin, angleAtMax);
+        float highestAngle = Mathf.Max(angleAtMin, angleAtMax);
+
+        // The angle that needs the least speed is halfway between straight up and the line to the target.
+        float minSpeedAngle = 45f + 0.5f * Mathf.Atan2(h, d) * Mathf.Rad2Deg;
+        float angle = Mathf.Clamp(minSpeedAngle + arcBiasDegrees, lowestAngle, highestAngle);
+
+        float speed = SpeedForAngle(angle, d, h, g);
+        _shotNote = "";
+
+        // Too flat to clear the height: try the steepest angle the hood allows instead.
+        if (float.IsNaN(speed))
+        {
+            angle = highestAngle;
+            speed = SpeedForAngle(angle, d, h, g);
+        }
+
+        if (float.IsNaN(speed))
+        {
+            _shotInRange = false;
+            _shotNote = "target too high for hood range";
+            speed = MaxBallSpeed();
+        }
+        else
+        {
+            _shotInRange = true;
+        }
+
+        float rpm = BallSpeedToRpm(speed);
+        if (rpm > maxShooterRpm)
+        {
+            _shotInRange = false;
+            _shotNote = "too far: needs " + rpm.ToString("0") + " rpm";
+        }
+
+        _launchAngle = angle;
+        _exitSpeedFps = speed * 3.28084f;
+        _shooterTargetRpm = Mathf.Clamp(rpm, minShooterRpm, maxShooterRpm);
+        _hoodTarget = Mathf.Clamp(HoodForLaunchAngle(angle), hoodMinAngle, hoodMaxAngle);
+    }
+
+    /// <summary>Ball speed (m/s) to land at flat distance d and height h when launched at this angle. NaN if impossible.</summary>
+    private static float SpeedForAngle(float angleDeg, float d, float h, float g)
+    {
+        float a = angleDeg * Mathf.Deg2Rad;
+        float cos = Mathf.Cos(a);
+        float drop = d * Mathf.Tan(a) - h;            // must be positive: the arc has to climb above the target line
+        if (cos <= 0.0001f || drop <= 0.0001f) return float.NaN;
+        return Mathf.Sqrt(g * d * d / (2f * cos * cos * drop));
+    }
+
+    private float LaunchAngleForHood(float hood) =>
+        hoodFlattensShot ? launchAngleAtHoodZero - hood : launchAngleAtHoodZero + hood;
+
+    private float HoodForLaunchAngle(float launch) =>
+        hoodFlattensShot ? launchAngleAtHoodZero - launch : launch - launchAngleAtHoodZero;
+
+    private float BallSpeedToRpm(float metersPerSecond)
+    {
+        float wheelCircumference = 2f * Mathf.PI * flywheelRadiusInches * 0.0254f;
+        return metersPerSecond / (wheelCircumference * launchEfficiency) * 60f;
+    }
+
+    private float MaxBallSpeed()
+    {
+        float wheelCircumference = 2f * Mathf.PI * flywheelRadiusInches * 0.0254f;
+        return maxShooterRpm / 60f * wheelCircumference * launchEfficiency;
+    }
+
+    private Vector3 ShotOriginPosition()
+    {
+        if (shotOrigin) return shotOrigin.position;
+        if (hoodJoint) return hoodJoint.transform.position;
+        Transform from = turret.GetReferencePoint();
+        return from ? from.position : turret.transform.position;
     }
 
     // ---------------------------------------------------------------------------------------- hood
@@ -452,7 +633,7 @@ public class TeamTitianium : RebuiltTurretRobot
         if (_spindexerKicking) spindexerSpeed = -spindexerSpeed * spindexerReverseFraction;
 
         // 3. Shooter and kicker. The kicker pauses during spindexer kicks so it doesn't fire half a ball.
-        Queue(shooterRollers, _shootRequested ? shooterRpm : 0f);
+        Queue(shooterRollers, _shootRequested ? _shooterTargetRpm : 0f);
         Queue(spindexerRollers, spindexerSpeed);
         Queue(kickerRollers, _feeding && !_spindexerKicking ? kickerRpm : 0f);
 
@@ -530,12 +711,15 @@ public class TeamTitianium : RebuiltTurretRobot
             $"Agitating  spindexer kick: {(_spindexerKicking ? "YES" : "no")}   intake pump: {(_intakeAgitating ? "YES" : "no")}\n" +
             $"Distance to target: {(_distanceFeet >= 0f ? _distanceFeet.ToString("0.0") + " ft" : "no target")}   " +
             $"Hood target: {_hoodTarget:0.0}°   Hood actual: {HoodActual()}\n" +
+            $"Shot: {(useShotCalculator ? "calculator" : "table")}   height {_heightDiffFeet:0.0} ft   " +
+            $"launch {_launchAngle:0.0}°   ball {_exitSpeedFps:0.0} ft/s   flywheel {_shooterTargetRpm:0} rpm   " +
+            $"{(_shotInRange ? "IN RANGE" : "OUT OF RANGE")} {_shotNote}\n" +
             $"Rollers  intake: {Count(intakeRollerList)}   spindexer: {Count(spindexerRollers)}   " +
             $"kicker: {Count(kickerRollers)}   shooter: {Count(shooterRollers)}\n" +
             $"Spindexer rpm: {RealRpm(spindexerRollers)}   Kicker rpm: {RealRpm(kickerRollers)}";
 
-        GUI.Box(new Rect(10, 10, 560, 190), GUIContent.none);
-        GUI.Label(new Rect(18, 14, 550, 185), text);
+        GUI.Box(new Rect(10, 10, 640, 215), GUIContent.none);
+        GUI.Label(new Rect(18, 14, 630, 210), text);
     }
 
     private string HoodActual()
