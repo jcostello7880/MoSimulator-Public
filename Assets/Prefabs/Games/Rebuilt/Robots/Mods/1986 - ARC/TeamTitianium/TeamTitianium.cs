@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Games.Rebuilt.Robots;
 using MoSimCore.BaseClasses.GameManagement;
+using MoSimCore.Enums;
 using RobotFramework.Components;
 using RobotFramework.Controllers.PidSystems;
 using RobotFramework.Enums;
@@ -233,6 +234,16 @@ public class TeamTitianium : RebuiltTurretRobot
     [SerializeField, Range(0f, 1f)] private float driveMultiplier = 1f;
     [SerializeField, Range(0f, 1f)] private float intakingDriveMultiplier = 1f;
 
+    [Header("Bumpers")]
+    [Tooltip("Red bumper set (object holding the red bumpers). Shown on the red alliance, hidden on blue.")]
+    [SerializeField] private GameObject redBumpers;
+    [Tooltip("Blue bumper set. Shown on the blue alliance, hidden on red.")]
+    [SerializeField] private GameObject blueBumpers;
+    [Tooltip("Optional instead of / as well as the sets above: bumper fabric renderers to recolor.")]
+    [SerializeField] private Renderer[] bumperRenderers;
+    [SerializeField] private Material redBumperMaterial;
+    [SerializeField] private Material blueBumperMaterial;
+
     [Header("Debug")]
     [Tooltip("Shows a live readout in the top-left of the Game view while playing.")]
     [SerializeField] private bool showDebug = true;
@@ -272,6 +283,8 @@ public class TeamTitianium : RebuiltTurretRobot
     private string _shotNote = "";
     private readonly Dictionary<InteractionRoller, float> _rollerCommands = new Dictionary<InteractionRoller, float>();
     private bool _coresDisabled;
+    private Alliance _appliedBumperAlliance;
+    private bool _bumpersApplied;
 
     /// <summary>How far the slide is actually out, 0 (stowed) to 1 (deployed).</summary>
     public float ExtendedFraction =>
@@ -312,6 +325,8 @@ public class TeamTitianium : RebuiltTurretRobot
         // Always call this, even if something above is missing, so the robot still finishes setting up.
         // It registers HandleSwm, StateHandler and ShooterHandler (which calls Shooting / Intaking / Idling).
         base.Init();
+
+        ApplyBumpers();
 
         int field = LayerMask.GetMask("Field");
         if (rampColliders != null)
@@ -428,6 +443,7 @@ public class TeamTitianium : RebuiltTurretRobot
     private void UpdateMechanisms()
     {
         if (disableSpindexerCores && !_coresDisabled) DisableSpindexerCores();
+        if (!_bumpersApplied || Alliance != _appliedBumperAlliance) ApplyBumpers();
 
         float dt = Time.deltaTime;
         bool intaking = _intakeMode == IntakeMode.Intaking;
@@ -536,6 +552,33 @@ public class TeamTitianium : RebuiltTurretRobot
             foreach (var col in core.GetComponents<Collider>()) col.enabled = false;
         }
         _coresDisabled = allFound;
+    }
+
+    /// <summary>Shows the bumper set and/or bumper color that matches this robot's alliance.</summary>
+    private void ApplyBumpers()
+    {
+        Alliance alliance = Alliance;
+        bool isRed = alliance == Alliance.Red;
+        bool isBlue = alliance == Alliance.Blue;
+        if (!isRed && !isBlue) return;      // alliance not decided yet (e.g. spawn select): try again next frame
+
+        if (redBumpers) redBumpers.SetActive(isRed);
+        if (blueBumpers) blueBumpers.SetActive(isBlue);
+
+        Material mat = isRed ? redBumperMaterial : blueBumperMaterial;
+        if (mat && bumperRenderers != null)
+        {
+            foreach (var r in bumperRenderers)
+            {
+                if (!r) continue;
+                var mats = r.sharedMaterials;
+                for (int i = 0; i < mats.Length; i++) mats[i] = mat;
+                r.sharedMaterials = mats;
+            }
+        }
+
+        _appliedBumperAlliance = alliance;
+        _bumpersApplied = true;
     }
 
     // ---------------------------------------------------------------------------------------- shot calculator
@@ -876,7 +919,7 @@ public class TeamTitianium : RebuiltTurretRobot
 
         string text =
             $"TeamTitianium debug\n" +
-            $"Robot state: {robotState}\n" +
+            $"Robot state: {robotState}   Alliance: {Alliance}\n" +
             $"Right trigger (shoot): {(OuttakeAction ? "HELD" : "not held")}   " +
             $"Left trigger: {(IntakeAction ? "HELD" : "not held")}\n" +
             $"Intake toggle (left bumper): {(_intakeToggled ? "ON" : "off")}   Mode: {_intakeMode}   " +
@@ -983,6 +1026,13 @@ public class TeamTitianium : RebuiltTurretRobot
             if (!intakeSlide) intakeSlide = any;
         }
         if (!turret) turret = GetComponentInChildren<GenericTurret>(true);
+        foreach (var t in GetComponentsInChildren<Transform>(true))
+        {
+            string n = t.name.ToLowerInvariant();
+            if (!n.Contains("bumper")) continue;
+            if (!redBumpers && n.Contains("red")) redBumpers = t.gameObject;
+            else if (!blueBumpers && n.Contains("blue")) blueBumpers = t.gameObject;
+        }
         if (!hoodJoint)
         {
             foreach (var j in GetComponentsInChildren<GenericJoint>(true))
@@ -1024,6 +1074,7 @@ public class TeamTitianium : RebuiltTurretRobot
         }
 
         Debug.Log($"{name}: slide {Found(intakeSlide)}, turret {Found(turret)}, hood {Found(hoodJoint)}, " +
+                  $"red bumpers {Found(redBumpers)}, blue bumpers {Found(blueBumpers)}, " +
                   $"intake rollers {Count(intakeRollerList)}{(intakeRollers ? " + group " + intakeRollers.name : "")}, " +
                   $"spindexer {Count(spindexerRollers)}, kicker {Count(kickerRollers)}, shooter {Count(shooterRollers)}, " +
                   $"{rampColliders?.Length ?? 0} ramp colliders. Now set the Reverse boxes.", this);
