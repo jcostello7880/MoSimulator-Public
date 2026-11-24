@@ -33,9 +33,9 @@ using Object = UnityEngine.Object;
 ///   Intake:    while shooting with the slide out and not intaking, the slide pumps in and out and the
 ///              intake rollers push inward, to shove the last fuel toward the spindexer.
 ///
-/// Every roller is listed on its own with a Reverse box, so rollers that must spin opposite ways are
-/// handled per roller. The arrow drawn on each Interaction Roller in the Scene view shows which way a
-/// positive rpm turns it: tick Reverse on any that point the wrong way.
+/// Each roller group has a Forward list and a Reversed list, so rollers that must spin opposite ways
+/// are handled per roller. The arrow drawn on each Interaction Roller in the Scene view shows which way a
+/// positive rpm turns it: move any that point the wrong way into the Reversed list.
 ///
 /// Why all roller commands go through ApplyRollers(): an Interaction Roller accepts only ONE speed
 /// command per physics frame (later ones are ignored, and Stop() counts as one). So this script decides
@@ -43,39 +43,9 @@ using Object = UnityEngine.Object;
 /// </summary>
 public class TeamTitianium : RebuiltTurretRobot
 {
-    /// <summary>One roller and the direction it should spin.</summary>
-    [Serializable]
-    public class RollerSpin
-    {
-        [Tooltip("The Interaction Roller to spin.")]
-        public InteractionRoller roller;
-        [Tooltip("Tick to spin this roller the opposite way from the others in its list.")]
-        public bool reverse;
-        [Tooltip("Speed relative to the list's rpm (1 = same speed, 0.5 = half). 0 = never spins.")]
-        public float multiplier = 1f;
-    }
-
-    /// <summary>One entry in the calculator trim table: small corrections to the calculator at this distance.</summary>
-    [Serializable]
-    public class CalcTrim
-    {
-        [Tooltip("Distance from the turret to the target, in feet.")]
-        public float distanceFeet;
-        [Tooltip("Degrees added to the calculator's hood angle at this distance (+ or -).")]
-        public float hoodAngleOffset;
-        [Tooltip("Percent added to the calculator's flywheel rpm at this distance (5 = 5% faster, -5 = 5% slower).")]
-        public float rpmPercent;
-    }
-
-    /// <summary>One entry in the hood table: at this distance, use this hood angle.</summary>
-    [Serializable]
-    public class HoodPoint
-    {
-        [Tooltip("Distance from the turret to the target, in feet.")]
-        public float distanceFeet;
-        [Tooltip("Hood angle to use at that distance, in degrees (0 = hood fully down).")]
-        public float hoodAngle;
-    }
+    // NOTE: every list below uses only built-in Unity types (arrays of components, Vector2, Vector3).
+    // Custom [Serializable] classes defined inside a mod script do not load in the real MoSim game, so
+    // lists made of them arrive empty there even though they work in the editor.
 
     [Header("Intake slide")]
     [Tooltip("The slide's GenericJoint (child with Rigidbody + ConfigurableJoint + GenericJoint).")]
@@ -96,20 +66,28 @@ public class TeamTitianium : RebuiltTurretRobot
     [Tooltip("Optional: an existing RollerGroup for the intake. Rollers that are ALSO in a list below " +
              "are controlled by the list, not by this group.")]
     [SerializeField] private RollerGroup intakeRollers;
-    [Tooltip("Intake rollers listed one by one, each with its own Reverse box.")]
-    [SerializeField] private RollerSpin[] intakeRollerList;
+    [Tooltip("Intake rollers that spin the normal way.")]
+    [SerializeField] private InteractionRoller[] intakeRollersForward;
+    [Tooltip("Intake rollers that must spin the OPPOSITE way.")]
+    [SerializeField] private InteractionRoller[] intakeRollersReversed;
     [Tooltip("Roller rpm while intaking (negative = spin the other way).")]
     [SerializeField] private float intakeRpm = 2000f;
     [Tooltip("Roller rpm while outtaking (Robot Special).")]
     [SerializeField] private float outtakeRpm = -2000f;
 
     [Header("Shooter rollers")]
-    [Tooltip("Spindexer roller(s). Each has its own Reverse box.")]
-    [SerializeField] private RollerSpin[] spindexerRollers;
-    [Tooltip("Kicker / feeder / uptake roller(s) that push fuel up into the shooter (optional).")]
-    [SerializeField] private RollerSpin[] kickerRollers;
-    [Tooltip("Shooter flywheel roller(s). Tick Reverse on the one(s) that must spin opposite.")]
-    [SerializeField] private RollerSpin[] shooterRollers;
+    [Tooltip("Spindexer rollers that spin the normal way.")]
+    [SerializeField] private InteractionRoller[] spindexerForward;
+    [Tooltip("Spindexer rollers that must spin the OPPOSITE way.")]
+    [SerializeField] private InteractionRoller[] spindexerReversed;
+    [Tooltip("Kicker / feeder / uptake rollers that spin the normal way.")]
+    [SerializeField] private InteractionRoller[] kickerForward;
+    [Tooltip("Kicker rollers that must spin the OPPOSITE way.")]
+    [SerializeField] private InteractionRoller[] kickerReversed;
+    [Tooltip("Shooter flywheel rollers that spin the normal way.")]
+    [SerializeField] private InteractionRoller[] shooterForward;
+    [Tooltip("Shooter flywheel rollers that must spin the OPPOSITE way.")]
+    [SerializeField] private InteractionRoller[] shooterReversed;
 
     [Header("Shooter values")]
     [SerializeField] private float spindexerRpm = 500f;
@@ -132,15 +110,15 @@ public class TeamTitianium : RebuiltTurretRobot
     [Tooltip("The joint axis the hood pivots around.")]
     [SerializeField] private JointAxis hoodAxis = JointAxis.X;
     [SerializeField] private PidConstants hoodPid;
-    [Tooltip("Distance → hood angle. Add as many rows as you like, in any order; angles between rows " +
-             "are blended. These starting numbers are guesses: tune them by testing shots.")]
-    [SerializeField] private HoodPoint[] hoodTable =
+    [Tooltip("Hood table (used when Use Shot Calculator is OFF). Each row: X = distance in feet, " +
+             "Y = hood angle in degrees. Rows in any order; values between rows are blended.")]
+    [SerializeField] private Vector2[] hoodAngleTable =
     {
-        new HoodPoint { distanceFeet = 4f,  hoodAngle = 5f  },
-        new HoodPoint { distanceFeet = 8f,  hoodAngle = 14f },
-        new HoodPoint { distanceFeet = 12f, hoodAngle = 21f },
-        new HoodPoint { distanceFeet = 16f, hoodAngle = 27f },
-        new HoodPoint { distanceFeet = 20f, hoodAngle = 32f },
+        new Vector2(4f, 5f),
+        new Vector2(8f, 14f),
+        new Vector2(12f, 21f),
+        new Vector2(16f, 27f),
+        new Vector2(20f, 32f),
     };
     [Tooltip("The hood never goes below / above these angles, in degrees.")]
     [SerializeField] private float hoodMinAngle = 0f;
@@ -174,13 +152,13 @@ public class TeamTitianium : RebuiltTurretRobot
     [SerializeField] private float maxShooterRpm = 6000f;
     [Tooltip("Only feed when the calculator says the shot is possible.")]
     [SerializeField] private bool onlyShootInRange = false;
-    [Tooltip("Fine-tuning for the calculator: at each distance, nudge its hood angle (degrees) and flywheel " +
-             "rpm (percent). Rows in any order; values between rows are blended; leave empty for no change.")]
-    [SerializeField] private CalcTrim[] calculatorTrimTable =
+    [Tooltip("Calculator fine-tuning. Each row: X = distance in feet, Y = degrees added to the hood angle, " +
+             "Z = percent added to flywheel rpm (5 = 5% faster). Rows in any order; values between rows are blended.")]
+    [SerializeField] private Vector3[] calculatorTrim =
     {
-        new CalcTrim { distanceFeet = 6f,  hoodAngleOffset = 0f, rpmPercent = 0f },
-        new CalcTrim { distanceFeet = 12f, hoodAngleOffset = 0f, rpmPercent = 0f },
-        new CalcTrim { distanceFeet = 18f, hoodAngleOffset = 0f, rpmPercent = 0f },
+        new Vector3(6f, 0f, 0f),
+        new Vector3(12f, 0f, 0f),
+        new Vector3(18f, 0f, 0f),
     };
 
     [Header("Shoot on move")]
@@ -194,11 +172,6 @@ public class TeamTitianium : RebuiltTurretRobot
     [SerializeField, Min(0f)] private float extraLeadTime = 0.1f;
     [Tooltip("How quickly the robot-speed reading follows the real speed (1 = instantly, lower = smoother).")]
     [SerializeField, Range(0.01f, 1f)] private float velocitySmoothing = 0.3f;
-
-    [Header("Spindexer collider")]
-    [Tooltip("Turn off the solid 'Wheel_InternalCore' collider that MoSim creates at runtime for every " +
-             "spindexer roller. The rollers still spin and still push fuel.")]
-    [SerializeField] private bool disableSpindexerCores = true;
 
     [Header("Spindexer agitation")]
     [Tooltip("Give the spindexer short reverse kicks on a timer so fuel doesn't jam.")]
@@ -282,7 +255,6 @@ public class TeamTitianium : RebuiltTurretRobot
     private float _leadFeet;
     private string _shotNote = "";
     private readonly Dictionary<InteractionRoller, float> _rollerCommands = new Dictionary<InteractionRoller, float>();
-    private bool _coresDisabled;
     private Alliance _appliedBumperAlliance;
     private bool _bumpersApplied;
 
@@ -298,19 +270,18 @@ public class TeamTitianium : RebuiltTurretRobot
         var missing = new List<string>();
         if (!intakeSlide) missing.Add(nameof(intakeSlide));
         if (!turret) missing.Add(nameof(turret));
-        if (!intakeRollers && Count(intakeRollerList) == 0) missing.Add("intake rollers");
-        if (Count(spindexerRollers) == 0) missing.Add(nameof(spindexerRollers));
-        if (Count(shooterRollers) == 0) missing.Add(nameof(shooterRollers));
+        if (!intakeRollers && Count(intakeRollersForward, intakeRollersReversed) == 0) missing.Add("intake rollers");
+        if (Count(spindexerForward, spindexerReversed) == 0) missing.Add("spindexer rollers");
+        if (Count(shooterForward, shooterReversed) == 0) missing.Add("shooter rollers");
         if (missing.Count > 0)
         {
             Debug.LogError($"{name}: unassigned {string.Join(", ", missing)} on TeamTitianium. " +
                            "Right-click the component > Auto-find references, or drag them in.", this);
         }
-        WarnAboutZeroMultipliers();
         if (!hoodJoint)
             Debug.LogWarning($"{name}: no Hood Joint assigned, so the hood won't move. Drag it in or use Auto-find references.", this);
-        if (hoodTable == null || hoodTable.Length == 0)
-            Debug.LogWarning($"{name}: the Hood Table is empty, so the hood will stay at its stow angle.", this);
+        if (!useShotCalculator && (hoodAngleTable == null || hoodAngleTable.Length == 0))
+            Debug.LogWarning($"{name}: the Hood Angle Table is empty, so the hood will stay at its stow angle.", this);
 
         if (hoodJoint) hoodJoint.SetPid(hoodPid);
 
@@ -442,7 +413,6 @@ public class TeamTitianium : RebuiltTurretRobot
     /// <summary>Updates the shooter / agitation timers and decides the slide target for this frame.</summary>
     private void UpdateMechanisms()
     {
-        if (disableSpindexerCores) DisableSpindexerCores();
         if (!_bumpersApplied || Alliance != _appliedBumperAlliance) ApplyBumpers();
 
         float dt = Time.deltaTime;
@@ -464,7 +434,7 @@ public class TeamTitianium : RebuiltTurretRobot
         // With a kicker, the kicker is what actually fires fuel, so the spindexer only needs the shooter
         // spun up: it keeps fuel moving toward the kicker even while the turret is still lining up or the
         // robot is driving. With no kicker, the spindexer IS the feeder, so it waits for the full check.
-        bool hasKicker = Count(kickerRollers) > 0;
+        bool hasKicker = Count(kickerForward, kickerReversed) > 0;
         _spindexerShooting = hasKicker ? (_shootRequested && _spinUpTimer >= spinUpTime) : _feeding;
 
         // Spindexer clock runs whenever the spindexer is being driven, so kicks keep their rhythm.
@@ -530,28 +500,6 @@ public class TeamTitianium : RebuiltTurretRobot
             _shotInRange = true;
             _shotNote = "table";
         }
-    }
-
-    /// <summary>
-    /// Each Interaction Roller builds a solid "Wheel_InternalCore" collider when it starts. This finds the
-    /// ones on the spindexer rollers and keeps them switched off. It checks every frame, so a core that is
-    /// created late (or re-enabled when the robot respawns) is caught too.
-    /// </summary>
-    private void DisableSpindexerCores()
-    {
-        if (spindexerRollers == null) { _coresDisabled = true; return; }
-
-        bool allFound = true;
-        foreach (var r in spindexerRollers)
-        {
-            if (r == null || !r.roller) continue;
-
-            Transform core = r.roller.transform.Find("Wheel_InternalCore");
-            if (core == null) { allFound = false; continue; }
-
-            foreach (var col in core.GetComponents<Collider>()) if (col.enabled) col.enabled = false;
-        }
-        _coresDisabled = allFound;
     }
 
     /// <summary>Shows the bumper set and/or bumper color that matches this robot's alliance.</summary>
@@ -700,42 +648,34 @@ public class TeamTitianium : RebuiltTurretRobot
         _leadFeet = lead.magnitude * 3.28084f;
     }
 
-    /// <summary>Blends the two nearest rows of the Calculator Trim Table for this distance. Empty table = no trim.</summary>
+    /// <summary>Blends the two nearest rows of the Calculator Trim table for this distance. Empty table = no trim.</summary>
     private void GetTrim(float feet, out float hoodOffset, out float rpmPercent)
     {
         hoodOffset = 0f;
         rpmPercent = 0f;
-        if (calculatorTrimTable == null || calculatorTrimTable.Length == 0 || feet < 0f) return;
+        if (calculatorTrim == null || calculatorTrim.Length == 0 || feet < 0f) return;
 
-        var rows = new List<CalcTrim>();
-        foreach (var row in calculatorTrimTable) if (row != null) rows.Add(row);
-        if (rows.Count == 0) return;
-        rows.Sort((a, b) => a.distanceFeet.CompareTo(b.distanceFeet));
+        var rows = new List<Vector3>(calculatorTrim);
+        rows.Sort((a, b) => a.x.CompareTo(b.x));
 
-        if (feet <= rows[0].distanceFeet)
+        Vector3 result;
+        if (feet <= rows[0].x) result = rows[0];
+        else if (feet >= rows[rows.Count - 1].x) result = rows[rows.Count - 1];
+        else
         {
-            hoodOffset = rows[0].hoodAngleOffset;
-            rpmPercent = rows[0].rpmPercent;
-            return;
+            result = rows[0];
+            for (int i = 0; i < rows.Count - 1; i++)
+            {
+                Vector3 a = rows[i], b = rows[i + 1];
+                if (feet < a.x || feet > b.x) continue;
+                float span = b.x - a.x;
+                float t = span > 0.0001f ? (feet - a.x) / span : 0f;
+                result = Vector3.Lerp(a, b, t);
+                break;
+            }
         }
-        var last = rows[rows.Count - 1];
-        if (feet >= last.distanceFeet)
-        {
-            hoodOffset = last.hoodAngleOffset;
-            rpmPercent = last.rpmPercent;
-            return;
-        }
-        for (int i = 0; i < rows.Count - 1; i++)
-        {
-            var a = rows[i];
-            var b = rows[i + 1];
-            if (feet < a.distanceFeet || feet > b.distanceFeet) continue;
-            float span = b.distanceFeet - a.distanceFeet;
-            float t = span > 0.0001f ? (feet - a.distanceFeet) / span : 0f;
-            hoodOffset = Mathf.Lerp(a.hoodAngleOffset, b.hoodAngleOffset, t);
-            rpmPercent = Mathf.Lerp(a.rpmPercent, b.rpmPercent, t);
-            return;
-        }
+        hoodOffset = result.y;
+        rpmPercent = result.z;
     }
 
     /// <summary>Ball speed (m/s) to land at flat distance d and height h when launched at this angle. NaN if impossible.</summary>
@@ -790,37 +730,26 @@ public class TeamTitianium : RebuiltTurretRobot
     /// <summary>Looks the distance up in the hood table, blending between the two nearest rows.</summary>
     private float HoodAngleForDistance(float feet)
     {
-        if (hoodTable == null || hoodTable.Length == 0) return hoodStowAngle;
+        if (hoodAngleTable == null || hoodAngleTable.Length == 0) return hoodStowAngle;
 
         // Copy and sort by distance, so table rows can be typed in any order.
-        var rows = new List<HoodPoint>();
-        foreach (var p in hoodTable) if (p != null) rows.Add(p);
-        if (rows.Count == 0) return hoodStowAngle;
-        rows.Sort((a, b) => a.distanceFeet.CompareTo(b.distanceFeet));
+        var rows = new List<Vector2>(hoodAngleTable);
+        rows.Sort((a, b) => a.x.CompareTo(b.x));
 
         float angle;
-        if (feet <= rows[0].distanceFeet)
-        {
-            angle = rows[0].hoodAngle;                              // closer than the first row
-        }
-        else if (feet >= rows[rows.Count - 1].distanceFeet)
-        {
-            angle = rows[rows.Count - 1].hoodAngle;                 // farther than the last row
-        }
+        if (feet <= rows[0].x) angle = rows[0].y;                               // closer than the first row
+        else if (feet >= rows[rows.Count - 1].x) angle = rows[rows.Count - 1].y; // farther than the last row
         else
         {
-            angle = rows[0].hoodAngle;
+            angle = rows[0].y;
             for (int i = 0; i < rows.Count - 1; i++)
             {
-                var a = rows[i];
-                var b = rows[i + 1];
-                if (feet >= a.distanceFeet && feet <= b.distanceFeet)
-                {
-                    float span = b.distanceFeet - a.distanceFeet;
-                    float t = span > 0.0001f ? (feet - a.distanceFeet) / span : 0f;
-                    angle = Mathf.Lerp(a.hoodAngle, b.hoodAngle, t);
-                    break;
-                }
+                Vector2 a = rows[i], b = rows[i + 1];
+                if (feet < a.x || feet > b.x) continue;
+                float span = b.x - a.x;
+                float t = span > 0.0001f ? (feet - a.x) / span : 0f;
+                angle = Mathf.Lerp(a.y, b.y, t);
+                break;
             }
         }
 
@@ -841,7 +770,7 @@ public class TeamTitianium : RebuiltTurretRobot
         else if (intaking) intakeSpeed = intakeRpm;
         else if (_intakeAgitating) intakeSpeed = intakeAgitationRollerRpm;
         else intakeSpeed = 0f;
-        Queue(intakeRollerList, intakeSpeed);
+        Queue(intakeRollersForward, intakeRollersReversed, intakeSpeed);
 
         // 2. Spindexer: forward, with reverse kicks when agitation is on.
         float spindexerSpeed = 0f;
@@ -850,9 +779,9 @@ public class TeamTitianium : RebuiltTurretRobot
         if (_spindexerKicking) spindexerSpeed = -spindexerSpeed * spindexerReverseFraction;
 
         // 3. Shooter and kicker. The kicker pauses during spindexer kicks so it doesn't fire half a ball.
-        Queue(shooterRollers, _shootRequested ? _shooterTargetRpm : 0f);
-        Queue(spindexerRollers, spindexerSpeed);
-        Queue(kickerRollers, _feeding && !_spindexerKicking ? kickerRpm : 0f);
+        Queue(shooterForward, shooterReversed, _shootRequested ? _shooterTargetRpm : 0f);
+        Queue(spindexerForward, spindexerReversed, spindexerSpeed);
+        Queue(kickerForward, kickerReversed, _feeding && !_spindexerKicking ? kickerRpm : 0f);
 
         // 4. Send: exactly one command per roller. 0 rpm = Stop().
         foreach (var command in _rollerCommands)
@@ -870,14 +799,11 @@ public class TeamTitianium : RebuiltTurretRobot
         }
     }
 
-    private void Queue(RollerSpin[] list, float rpm)
+    /// <summary>Queues rpm for the forward rollers and -rpm for the reversed ones.</summary>
+    private void Queue(InteractionRoller[] forward, InteractionRoller[] reversed, float rpm)
     {
-        if (list == null) return;
-        foreach (var r in list)
-        {
-            if (r == null || !r.roller) continue;
-            _rollerCommands[r.roller] = (r.reverse ? -rpm : rpm) * r.multiplier;
-        }
+        if (forward != null) foreach (var r in forward) if (r) _rollerCommands[r] = rpm;
+        if (reversed != null) foreach (var r in reversed) if (r) _rollerCommands[r] = -rpm;
     }
 
     // ---------------------------------------------------------------------------------------- joints
@@ -936,9 +862,9 @@ public class TeamTitianium : RebuiltTurretRobot
             $"Trim at this distance: hood {_trimHood:+0.0;-0.0;0}°   rpm {_trimRpmPercent:+0.0;-0.0;0}%\n" +
             $"Shoot on move: {(shootOnMove ? "ON" : "off")}   robot {_moveVelocity.magnitude * 3.28084f:0.0} ft/s   " +
             $"flight {_timeOfFlight:0.00} s   lead {_leadFeet:0.0} ft\n" +
-            $"Rollers  intake: {Count(intakeRollerList)}   spindexer: {Count(spindexerRollers)}   " +
-            $"kicker: {Count(kickerRollers)}   shooter: {Count(shooterRollers)}\n" +
-            $"Spindexer rpm: {RealRpm(spindexerRollers)}   Kicker rpm: {RealRpm(kickerRollers)}";
+            $"Rollers  intake: {Count(intakeRollersForward, intakeRollersReversed)}   spindexer: {Count(spindexerForward, spindexerReversed)}   " +
+            $"kicker: {Count(kickerForward, kickerReversed)}   shooter: {Count(shooterForward, shooterReversed)}\n" +
+            $"Spindexer rpm: {RealRpm(spindexerForward, spindexerReversed)}   Kicker rpm: {RealRpm(kickerForward, kickerReversed)}";
 
         GUI.Box(new Rect(10, 10, 680, 275), GUIContent.none);
         GUI.Label(new Rect(18, 14, 670, 270), text);
@@ -970,36 +896,21 @@ public class TeamTitianium : RebuiltTurretRobot
         return angle.ToString("0.0") + "°";
     }
 
-    private static string RealRpm(RollerSpin[] list)
+    private static string RealRpm(InteractionRoller[] forward, InteractionRoller[] reversed)
     {
-        if (list == null) return "-";
-        foreach (var r in list)
-            if (r != null && r.roller) return r.roller.realRpm.ToString("0");
+        if (forward != null) foreach (var r in forward) if (r) return r.realRpm.ToString("0");
+        if (reversed != null) foreach (var r in reversed) if (r) return r.realRpm.ToString("0");
         return "-";
     }
 
     // ---------------------------------------------------------------------------------------- helpers
 
-    private static int Count(RollerSpin[] list)
+    private static int Count(InteractionRoller[] forward, InteractionRoller[] reversed)
     {
         int n = 0;
-        if (list != null) foreach (var r in list) if (r != null && r.roller) n++;
+        if (forward != null) foreach (var r in forward) if (r) n++;
+        if (reversed != null) foreach (var r in reversed) if (r) n++;
         return n;
-    }
-
-    private void WarnAboutZeroMultipliers()
-    {
-        void Check(RollerSpin[] list, string label)
-        {
-            if (list == null) return;
-            foreach (var r in list)
-                if (r != null && r.roller && Mathf.Approximately(r.multiplier, 0f))
-                    Debug.LogWarning($"{name}: {label} roller '{r.roller.name}' has Multiplier 0, so it will never spin. Set it to 1.", this);
-        }
-        Check(intakeRollerList, "Intake");
-        Check(spindexerRollers, "Spindexer");
-        Check(kickerRollers, "Kicker");
-        Check(shooterRollers, "Shooter");
     }
 
     // ---------------------------------------------------------------------------------------- editor setup
@@ -1009,7 +920,7 @@ public class TeamTitianium : RebuiltTurretRobot
     /// <summary>
     /// Fills only empty fields. Rollers are sorted by the names of the roller object and its parents:
     /// "spindex" = spindexer, "kick"/"feed"/"uptake" = kicker, "shoot"/"flywheel" = shooter,
-    /// anything else under the intake slide = intake. Reverse boxes start unticked: set them yourself.
+    /// anything else under the intake slide = intake. Everything starts in Forward: move wrong-way rollers to Reversed.
     /// </summary>
     [ContextMenu("Auto-find references")]
     private void AutoFindReferences()
@@ -1042,25 +953,26 @@ public class TeamTitianium : RebuiltTurretRobot
             }
         }
 
-        var spindex = new List<RollerSpin>();
-        var kick = new List<RollerSpin>();
-        var shoot = new List<RollerSpin>();
-        var intake = new List<RollerSpin>();
+        var spindex = new List<InteractionRoller>();
+        var kick = new List<InteractionRoller>();
+        var shoot = new List<InteractionRoller>();
+        var intake = new List<InteractionRoller>();
 
         foreach (var roller in GetComponentsInChildren<InteractionRoller>(true))
         {
             string path = PathName(roller.transform);
-            var entry = new RollerSpin { roller = roller, multiplier = 1f };
+            var entry = roller;
             if (path.Contains("spindex")) spindex.Add(entry);
             else if (path.Contains("kick") || path.Contains("feed") || path.Contains("uptake")) kick.Add(entry);
             else if (path.Contains("shoot") || path.Contains("flywheel")) shoot.Add(entry);
             else if (intakeSlide && roller.transform.IsChildOf(intakeSlide.transform)) intake.Add(entry);
         }
 
-        if (Count(spindexerRollers) == 0) spindexerRollers = spindex.ToArray();
-        if (Count(kickerRollers) == 0) kickerRollers = kick.ToArray();
-        if (Count(shooterRollers) == 0) shooterRollers = shoot.ToArray();
-        if (Count(intakeRollerList) == 0 && !intakeRollers) intakeRollerList = intake.ToArray();
+        // New finds go in the Forward lists; move any that spin the wrong way into the Reversed list.
+        if (Count(spindexerForward, spindexerReversed) == 0) spindexerForward = spindex.ToArray();
+        if (Count(kickerForward, kickerReversed) == 0) kickerForward = kick.ToArray();
+        if (Count(shooterForward, shooterReversed) == 0) shooterForward = shoot.ToArray();
+        if (Count(intakeRollersForward, intakeRollersReversed) == 0 && !intakeRollers) intakeRollersForward = intake.ToArray();
 
         if (intakeSlide && (rampColliders == null || rampColliders.Length == 0))
         {
@@ -1075,9 +987,9 @@ public class TeamTitianium : RebuiltTurretRobot
 
         Debug.Log($"{name}: slide {Found(intakeSlide)}, turret {Found(turret)}, hood {Found(hoodJoint)}, " +
                   $"red bumpers {Found(redBumpers)}, blue bumpers {Found(blueBumpers)}, " +
-                  $"intake rollers {Count(intakeRollerList)}{(intakeRollers ? " + group " + intakeRollers.name : "")}, " +
-                  $"spindexer {Count(spindexerRollers)}, kicker {Count(kickerRollers)}, shooter {Count(shooterRollers)}, " +
-                  $"{rampColliders?.Length ?? 0} ramp colliders. Now set the Reverse boxes.", this);
+                  $"intake rollers {Count(intakeRollersForward, intakeRollersReversed)}{(intakeRollers ? " + group " + intakeRollers.name : "")}, " +
+                  $"spindexer {Count(spindexerForward, spindexerReversed)}, kicker {Count(kickerForward, kickerReversed)}, shooter {Count(shooterForward, shooterReversed)}, " +
+                  $"{rampColliders?.Length ?? 0} ramp colliders. Now move any wrong-way rollers into the Reversed lists.", this);
     }
 
     // Name of this object and every parent up to the robot, lower-case, so "Shooter/Roller (2)" still matches "shoot".

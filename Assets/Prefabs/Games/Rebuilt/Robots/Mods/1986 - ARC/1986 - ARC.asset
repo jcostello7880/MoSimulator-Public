@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: 1986 - ARC
   m_EditorClassIdentifier: 
   modpackName: 1986 - ARC
-  modpackVersion: 1.0.1
+  modpackVersion: 1.1.0
   authorName: BOMBvoyage
   description: TheARCRobotFrom1986
   thumbnail: {fileID: 0}
