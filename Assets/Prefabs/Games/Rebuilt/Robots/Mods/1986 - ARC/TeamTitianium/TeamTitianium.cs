@@ -442,7 +442,7 @@ public class TeamTitianium : RebuiltTurretRobot
     /// <summary>Updates the shooter / agitation timers and decides the slide target for this frame.</summary>
     private void UpdateMechanisms()
     {
-        if (disableSpindexerCores && !_coresDisabled) DisableSpindexerCores();
+        if (disableSpindexerCores) DisableSpindexerCores();
         if (!_bumpersApplied || Alliance != _appliedBumperAlliance) ApplyBumpers();
 
         float dt = Time.deltaTime;
@@ -534,8 +534,8 @@ public class TeamTitianium : RebuiltTurretRobot
 
     /// <summary>
     /// Each Interaction Roller builds a solid "Wheel_InternalCore" collider when it starts. This finds the
-    /// ones on the spindexer rollers and switches them off. Runs every frame until every spindexer roller's
-    /// core has been found (the rollers may start after the robot).
+    /// ones on the spindexer rollers and keeps them switched off. It checks every frame, so a core that is
+    /// created late (or re-enabled when the robot respawns) is caught too.
     /// </summary>
     private void DisableSpindexerCores()
     {
@@ -549,7 +549,7 @@ public class TeamTitianium : RebuiltTurretRobot
             Transform core = r.roller.transform.Find("Wheel_InternalCore");
             if (core == null) { allFound = false; continue; }
 
-            foreach (var col in core.GetComponents<Collider>()) col.enabled = false;
+            foreach (var col in core.GetComponents<Collider>()) if (col.enabled) col.enabled = false;
         }
         _coresDisabled = allFound;
     }
