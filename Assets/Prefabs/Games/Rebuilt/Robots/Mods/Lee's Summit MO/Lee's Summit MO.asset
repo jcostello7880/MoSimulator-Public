@@ -1,0 +1,23 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e031b48ae5c148f090b1cba3d1097ada, type: 3}
+  m_Name: Lee's Summit MO
+  m_EditorClassIdentifier: 
+  modpackName: Lee's Summit MO
+  modpackVersion: 1.0.0
+  authorName: BOMBvoyage
+  description: 
+  thumbnail: {fileID: 0}
+  robots:
+  - {fileID: 11400000, guid: 0b9d0223a9ef59dbd8c0847cb3403dbc, type: 2}
+  - {fileID: 11400000, guid: d6d7a1b249ec9b1d5b56f9f87bee25ee, type: 2}
+  - {fileID: 11400000, guid: a9f085d3aa7389a06b08f70a60666a18, type: 2}

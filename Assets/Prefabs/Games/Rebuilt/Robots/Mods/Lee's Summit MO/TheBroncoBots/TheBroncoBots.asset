@@ -1,0 +1,31 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: be1409438a6844eea96767966da7413b, type: 3}
+  m_Name: TheBroncoBots
+  m_EditorClassIdentifier: 
+  teamNumber: 1987
+  teamName: The BroncoBots
+  robotImage: {fileID: 0}
+  mainRobot:
+    displayName: The BroncoBots
+    robotPrefab: {fileID: 6340127694884929484, guid: 52caa3709ea158001b9b2005d225a43e,
+      type: 3}
+    mainMenuPrefab: {fileID: 7732549119663948426, guid: 54beeb7cc3d1e9d87ab1950bd54e6416,
+      type: 3}
+    spawnSelectionPrefab: {fileID: 3599542882332083578, guid: 3456ff2c51893e1c4a7f22c080db4508,
+      type: 3}
+    preloadGamePiece: {fileID: 0}
+    tutorialCards:
+    - {fileID: 599051990036462548, guid: 09c1bc56a7bdb63c3937f6ae079bf5b8, type: 3}
+    - {fileID: 2306817422742526632, guid: 6def4c9d6bb4c6be49d93e58875381ef, type: 3}
+    - {fileID: 1715996032039567337, guid: b9e1d67733cd5bd55b58e3cb0ec9c937, type: 3}
+  alternateRobots: []

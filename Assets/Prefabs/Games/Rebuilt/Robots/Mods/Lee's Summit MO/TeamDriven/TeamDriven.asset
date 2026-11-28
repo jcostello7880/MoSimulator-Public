@@ -1,0 +1,31 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: be1409438a6844eea96767966da7413b, type: 3}
+  m_Name: TeamDriven
+  m_EditorClassIdentifier: 
+  teamNumber: 1730
+  teamName: Team Driven
+  robotImage: {fileID: 0}
+  mainRobot:
+    displayName: Team Driven
+    robotPrefab: {fileID: 5109462074740818500, guid: 4285480128a1bbb678f69e07eb4d3bd4,
+      type: 3}
+    mainMenuPrefab: {fileID: 1950233676482729252, guid: 1b561c031eaf1465e9bcfcb3330c2ad7,
+      type: 3}
+    spawnSelectionPrefab: {fileID: 1798089454837596974, guid: 1d11a82a4a5e05a14874022bffea5831,
+      type: 3}
+    preloadGamePiece: {fileID: 0}
+    tutorialCards:
+    - {fileID: 2987521497703219010, guid: c50708880b638b0d3a982f8d18991ce4, type: 3}
+    - {fileID: 6719651516728191802, guid: f409b9f358083d890a5371b60bc020d8, type: 3}
+    - {fileID: 6775831738766451359, guid: 01624909634d76e48a38e8a83911735a, type: 3}
+  alternateRobots: []

@@ -1,0 +1,31 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: be1409438a6844eea96767966da7413b, type: 3}
+  m_Name: TeamTitianium
+  m_EditorClassIdentifier: 
+  teamNumber: 1986
+  teamName: Team Titianium
+  robotImage: {fileID: 0}
+  mainRobot:
+    displayName: Team Titianium
+    robotPrefab: {fileID: 3391612946767725220, guid: 8eb8602e27e9d91a3936e7410609ea1a,
+      type: 3}
+    mainMenuPrefab: {fileID: 108393590663877376, guid: ee4fbc5851353c5948af7d744cc39a1b,
+      type: 3}
+    spawnSelectionPrefab: {fileID: 4941402907928323692, guid: 46bd0a62dc67fbec48a9869fd787effa,
+      type: 3}
+    preloadGamePiece: {fileID: 0}
+    tutorialCards:
+    - {fileID: 3131906302238088798, guid: ec607c48246c462f696177cbbff83861, type: 3}
+    - {fileID: 5560408941934368210, guid: 110cb2d90228efb1bbdc68dad0014f70, type: 3}
+    - {fileID: 2852590429477330679, guid: ba66b589e6190dcc6ba72ebcbace76a3, type: 3}
+  alternateRobots: []

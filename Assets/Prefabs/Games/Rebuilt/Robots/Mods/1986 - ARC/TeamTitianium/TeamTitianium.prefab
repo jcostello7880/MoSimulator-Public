@@ -108236,7 +108236,7 @@ MonoBehaviour:
   shooterReversed:
   - {fileID: 3940273948253763999}
   - {fileID: 4725325636847895782}
-  spindexerRpm: 400
+  spindexerRpm: 1600
   kickerRpm: 3000
   shooterRpm: 7000
   spinUpTime: 0.5
@@ -108303,7 +108303,7 @@ MonoBehaviour:
   bumperRenderers: []
   redBumperMaterial: {fileID: 0}
   blueBumperMaterial: {fileID: 0}
-  showDebug: 1
+  showDebug: 0
 --- !u!4 &8341826653128732225 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: 7705159093392549457, guid: fac5411432a8c96498487f1fffc06c74,
